@@ -394,6 +394,7 @@ DEFAULT_SHEET_NAMES = {
     "Cytokine": "",
     "Flow": "",
     "NanoString": "",
+    "Metadata": "",
 }
 
 # ============================================================
@@ -672,14 +673,26 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
-def build_categorized_output(activity_binary: pd.DataFrame) -> pd.DataFrame:
+def build_categorized_output(
+    activity_binary: pd.DataFrame,
+    platform_responses: dict = None,
+) -> pd.DataFrame:
     """Reshape the flat 1/0 table into the categorized template: 'Y' where the
     signature is present (1), blank otherwise. Signatures that are not part of
-    the template are kept under an 'Other' group so nothing is dropped."""
+    the template are kept under an 'Other' group so nothing is dropped.
+    Platform Response is populated from metadata based on Sample_ID and Arm."""
     norm_to_col = {_norm(c): c for c in activity_binary.columns}
     used = set()
 
-    data = {(PLATFORM_COL, ""): pd.Series("", index=activity_binary.index)}
+    if platform_responses:
+        resp_series = pd.Series(
+            [platform_responses.get(str(s).strip(), "") for s in activity_binary.index],
+            index=activity_binary.index,
+        )
+    else:
+        resp_series = pd.Series("", index=activity_binary.index)
+
+    data = {(PLATFORM_COL, ""): resp_series}
 
     for category, columns in TEMPLATE_LAYOUT:
         for display_name, keys in columns:
@@ -876,6 +889,7 @@ with st.sidebar:
     sheet_cytokine = _sheet_picker("Cytokine sheet", DEFAULT_SHEET_NAMES["Cytokine"])
     sheet_flow = _sheet_picker("Flow sheet", DEFAULT_SHEET_NAMES["Flow"])
     sheet_nanostring = _sheet_picker("NanoString sheet", DEFAULT_SHEET_NAMES["NanoString"])
+    sheet_metadata = _sheet_picker("Metadata sheet (optional)", DEFAULT_SHEET_NAMES["Metadata"])
 
     st.header("3. Arm selection")
     st.caption(
@@ -1035,6 +1049,28 @@ if run_button:
         # 8. Binary presence table (1 = present)
         activity_binary = build_activity_binary(final_activity)
 
+        # 9. Extract Platform Response from metadata sheet if provided
+        platform_responses = {}
+        if sheet_metadata and sheet_metadata in workbook.sheet_names:
+            try:
+                meta_df = workbook.parse(sheet_metadata)
+                meta_df.columns = [str(c).strip() for c in meta_df.columns]
+                col_sample = next((c for c in meta_df.columns if c.lower() in ["sample_id", "sample id", "sampleid", "sample"]), None)
+                col_arm = next((c for c in meta_df.columns if c.lower() in ["arms", "arm"]), None)
+                col_resp = next((c for c in meta_df.columns if c.lower() in ["response", "platform response", "platform_response", "resp"]), None)
+
+                if col_sample and col_resp:
+                    if col_arm:
+                        arm_matches = meta_df[meta_df[col_arm].astype(str).str.strip() == str(treatment_arm).strip()]
+                        if len(arm_matches) > 0:
+                            platform_responses = dict(zip(arm_matches[col_sample].astype(str).str.strip(), arm_matches[col_resp].astype(str).str.strip()))
+                        else:
+                            platform_responses = dict(zip(meta_df[col_sample].astype(str).str.strip(), meta_df[col_resp].astype(str).str.strip()))
+                    else:
+                        platform_responses = dict(zip(meta_df[col_sample].astype(str).str.strip(), meta_df[col_resp].astype(str).str.strip()))
+            except Exception as e:
+                st.warning(f"Could not read metadata from '{sheet_metadata}': {e}")
+
         # stash everything in session state so results survive reruns
         st.session_state.update(
             dict(
@@ -1044,6 +1080,7 @@ if run_button:
                 summary1=summary1, summary2=summary2, summary3=summary3, summary4=summary4,
                 final_activity=final_activity,
                 activity_binary=activity_binary,
+                platform_responses=platform_responses,
                 control_arm=control_arm,
                 treatment_arm=treatment_arm,
                 run_stamp=datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -1057,6 +1094,7 @@ if run_button:
 
 final_activity = st.session_state["final_activity"]
 activity_binary = st.session_state["activity_binary"]
+platform_responses = st.session_state.get("platform_responses", {})
 
 st.divider()
 st.header("Final output — Activity presence table")
@@ -1089,12 +1127,12 @@ def _style_cells(df: pd.DataFrame, fn):
     return styler.map(fn) if hasattr(styler, "map") else styler.applymap(fn)
 
 
-# Categorized table: Y = present, blank = not present
-categorized = build_categorized_output(activity_binary)
+# Categorized table: Y = present, blank = not present, with Platform Response
+categorized = build_categorized_output(activity_binary, platform_responses)
 _y_style = lambda v: (
     "background-color: #F7EBFB; color: #7C1F92; font-weight: 700; text-align: center;"
     if v == "Y"
-    else ""
+    else ("text-align: center; font-weight: 600;" if v != "" else "")
 )
 st.dataframe(_style_cells(categorized, _y_style), use_container_width=True)
 
